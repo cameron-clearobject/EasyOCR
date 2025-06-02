@@ -7,7 +7,7 @@ import torchvision.transforms as transforms
 import numpy as np
 from collections import OrderedDict
 import importlib
-from .utils import CTCLabelConverter
+from .utils import CTCLabelConverter, AttnLabelConverter
 import math
 
 def custom_mean(x):
@@ -106,47 +106,90 @@ def recognizer_predict(model, converter, test_loader, batch_max_length,\
             image = image_tensors.to(device)
             # For max length prediction
             length_for_pred = torch.IntTensor([batch_max_length] * batch_size).to(device)
-            text_for_pred = torch.LongTensor(batch_size, batch_max_length + 1).fill_(0).to(device)
 
-            preds = model(image, text_for_pred)
+            if isinstance(converter,CTCLabelConverter):
 
-            # Select max probabilty (greedy decoding) then decode index to character
-            preds_size = torch.IntTensor([preds.size(1)] * batch_size)
+                text_for_pred = torch.LongTensor(batch_size, batch_max_length + 1).fill_(0).to(device)
+                preds = model(image, text_for_pred)
 
-            ######## filter ignore_char, rebalance
-            preds_prob = F.softmax(preds, dim=2)
-            preds_prob = preds_prob.cpu().detach().numpy()
-            preds_prob[:,:,ignore_idx] = 0.
-            pred_norm = preds_prob.sum(axis=2)
-            preds_prob = preds_prob/np.expand_dims(pred_norm, axis=-1)
-            preds_prob = torch.from_numpy(preds_prob).float().to(device)
-
-            if decoder == 'greedy':
                 # Select max probabilty (greedy decoding) then decode index to character
-                _, preds_index = preds_prob.max(2)
-                preds_index = preds_index.view(-1)
-                preds_str = converter.decode_greedy(preds_index.data.cpu().detach().numpy(), preds_size.data)
-            elif decoder == 'beamsearch':
-                k = preds_prob.cpu().detach().numpy()
-                preds_str = converter.decode_beamsearch(k, beamWidth=beamWidth)
-            elif decoder == 'wordbeamsearch':
-                k = preds_prob.cpu().detach().numpy()
-                preds_str = converter.decode_wordbeamsearch(k, beamWidth=beamWidth)
+                preds_size = torch.IntTensor([preds.size(1)] * batch_size)
 
-            preds_prob = preds_prob.cpu().detach().numpy()
-            values = preds_prob.max(axis=2)
-            indices = preds_prob.argmax(axis=2)
-            preds_max_prob = []
-            for v,i in zip(values, indices):
-                max_probs = v[i!=0]
-                if len(max_probs)>0:
-                    preds_max_prob.append(max_probs)
-                else:
-                    preds_max_prob.append(np.array([0]))
+                ######## filter ignore_char, rebalance
+                preds_prob = F.softmax(preds, dim=2)
+                preds_prob = preds_prob.cpu().detach().numpy()
+                preds_prob[:,:,ignore_idx] = 0.
+                pred_norm = preds_prob.sum(axis=2)
+                preds_prob = preds_prob/np.expand_dims(pred_norm, axis=-1)
+                preds_prob = torch.from_numpy(preds_prob).float().to(device)
 
-            for pred, pred_max_prob in zip(preds_str, preds_max_prob):
-                confidence_score = custom_mean(pred_max_prob)
-                result.append([pred, confidence_score])
+                if decoder == 'greedy':
+                    # Select max probabilty (greedy decoding) then decode index to character
+                    _, preds_index = preds_prob.max(2)
+                    preds_index = preds_index.view(-1)
+                    preds_str = converter.decode_greedy(preds_index.data.cpu().detach().numpy(), preds_size.data)
+                elif decoder == 'beamsearch':
+                    k = preds_prob.cpu().detach().numpy()
+                    preds_str = converter.decode_beamsearch(k, beamWidth=beamWidth)
+                elif decoder == 'wordbeamsearch':
+                    k = preds_prob.cpu().detach().numpy()
+                    preds_str = converter.decode_wordbeamsearch(k, beamWidth=beamWidth)
+
+                preds_prob = preds_prob.cpu().detach().numpy()
+                values = preds_prob.max(axis=2)
+                indices = preds_prob.argmax(axis=2)
+                preds_max_prob = []
+                for v,i in zip(values, indices):
+                    max_probs = v[i!=0]
+                    if len(max_probs)>0:
+                        preds_max_prob.append(max_probs)
+                    else:
+                        preds_max_prob.append(np.array([0]))
+
+                for pred, pred_max_prob in zip(preds_str, preds_max_prob):
+                    confidence_score = custom_mean(pred_max_prob)
+                    result.append([pred, confidence_score])
+
+            elif isinstance(converter, AttnLabelConverter):
+
+                text_for_pred_attn = torch.LongTensor(batch_size, batch_max_length + 1).fill_(0).to(device)
+
+                # Model call for Attention from validation: model(image, text, is_train=False)
+                # The model from get_recognizer must support this signature if it's an attention model.
+                preds = model(image, text_for_pred_attn, is_train=False) 
+
+                preds_prob = F.softmax(preds, dim=2) #
+                # preds_max_prob_values are the probabilities of the characters with max prob at each step.
+                preds_max_prob_values, preds_indices = preds_prob.max(dim=2) #
+
+                # Decode using AttnLabelConverter.decode
+                # length_for_pred (batch_max_length) is used by AttnLabelConverter.decode
+                decoded_texts_list = converter.decode(preds_indices.cpu(), length_for_pred.cpu()) 
+
+                eos_token = '[s]' # End-of-sentence token for AttnLabelConverter
+
+                for i in range(batch_size):
+                    raw_pred_text = decoded_texts_list[i]
+                    # Probabilities of the characters chosen at each step in raw_pred_text
+                    char_probabilities = preds_max_prob_values[i] 
+
+                    # Prune at End-of-Sentence token '[s]'
+                    eos_position = raw_pred_text.find(eos_token) 
+                    
+                    final_text = raw_pred_text
+                    probs_for_confidence = char_probabilities 
+
+                    if eos_position != -1:
+                        final_text = raw_pred_text[:eos_position] #
+                        probs_for_confidence = char_probabilities[:eos_position] #
+
+                    # Calculate confidence score for Attention
+                    confidence_score = 0.0
+                    if probs_for_confidence.numel() > 0:
+                        # Confidence is the product of probabilities of selected characters
+                        confidence_score = probs_for_confidence.cumprod(dim=0)[-1].item() 
+                    
+                    result.append([final_text, confidence_score])
 
     return result
 
@@ -154,13 +197,16 @@ def get_recognizer(recog_network, network_params, character,\
                    separator_list, dict_list, model_path,\
                    device = 'cpu', quantize = True):
 
-    converter = CTCLabelConverter(character, separator_list, dict_list)
+    # converter = CTCLabelConverter(character, separator_list, dict_list)
+    converter = AttnLabelConverter(character)
     num_class = len(converter.character)
 
     if recog_network == 'generation1':
         model_pkg = importlib.import_module("easyocr.model.model")
     elif recog_network == 'generation2':
         model_pkg = importlib.import_module("easyocr.model.vgg_model")
+    elif recog_network == 'custom_ocr':
+        model_pkg = importlib.import_module("easyocr.custom_ocr.model")
     else:
         model_pkg = importlib.import_module(recog_network)
     model = model_pkg.Model(num_class=num_class, **network_params)

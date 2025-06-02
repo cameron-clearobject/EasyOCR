@@ -1,0 +1,33 @@
+network_params:
+  number: '0123456789'
+  symbol: "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"
+  lang_char: 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
+
+  batch_max_length: 34
+  imgH: 64
+  imgW: 128
+  rgb: False
+  contrast_adjust: False
+  sensitive: True
+  PAD: True
+  contrast_adjust: 0.0
+  data_filtering_off: False
+  # Model Architecture
+  Transformation: 'TPS'
+  FeatureExtraction: 'ResNet'
+  SequenceModeling: 'BiLSTM'
+  Prediction: 'Attn'
+  num_fiducial: 20
+  input_channel: 1
+  # output_channel: 256
+  output_channel: 512
+  hidden_size: 256
+  # hidden_size: 512
+  decode: 'greedy'
+  new_prediction: False
+  freeze_FeatureFxtraction: False
+  freeze_SequenceModeling: False
+imgH: 64
+lang_list:
+         - 'en'
+character_list: 0123456789!"#$%&'()*+,-./:;<=>?@[\]^_`{|}~abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ

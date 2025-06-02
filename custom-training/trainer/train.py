@@ -11,10 +11,10 @@ import torch.utils.data
 from torch.cuda.amp import autocast, GradScaler
 import numpy as np
 
-from utils import CTCLabelConverter, AttnLabelConverter, Averager
-from dataset import hierarchical_dataset, AlignCollate, Batch_Balanced_Dataset
-from model import Model
-from test import validation
+from .utils import CTCLabelConverter, AttnLabelConverter, Averager
+from .dataset import hierarchical_dataset, AlignCollate, Batch_Balanced_Dataset
+from .model import Model, Attention
+from .test import validation
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 def count_parameters(model):
@@ -59,6 +59,8 @@ def train(opt, show_number = 2, amp=False):
         converter = AttnLabelConverter(opt.character)
     opt.num_class = len(converter.character)
 
+    print(converter.character)
+
     if opt.rgb:
         opt.input_channel = 3
     model = Model(opt)
@@ -69,8 +71,11 @@ def train(opt, show_number = 2, amp=False):
     if opt.saved_model != '':
         pretrained_dict = torch.load(opt.saved_model)
         if opt.new_prediction:
-            model.Prediction = nn.Linear(model.SequenceModeling_output, len(pretrained_dict['module.Prediction.weight']))  
-        
+            if opt.Prediction == 'CTC':
+                model.Prediction = nn.Linear(model.SequenceModeling_output, len(converter.character))
+            elif opt.Prediction == 'Attn':
+                model.Prediction = Attention(model.SequenceModeling_output, opt.hidden_size, len(converter.character))
+            
         model = torch.nn.DataParallel(model).to(device) 
         print(f'loading pretrained model from {opt.saved_model}')
         if opt.FT:
@@ -78,7 +83,11 @@ def train(opt, show_number = 2, amp=False):
         else:
             model.load_state_dict(pretrained_dict)
         if opt.new_prediction:
-            model.module.Prediction = nn.Linear(model.module.SequenceModeling_output, opt.num_class)  
+            if opt.Prediction == 'CTC':
+                model.module.Prediction = nn.Linear(model.module.SequenceModeling_output, opt.num_class)  
+            elif opt.Prediction == 'Attn':
+                model.module.Prediction = Attention(model.module.SequenceModeling_output, opt.hidden_size, len(converter.character))
+            
             for name, param in model.module.Prediction.named_parameters():
                 if 'bias' in name:
                     init.constant_(param, 0.0)
